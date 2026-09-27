@@ -19,6 +19,7 @@ from grader.runner import grade_one, run_capture_only, run_function_capture_only
 from online_exam import service, ui_style
 
 CONSTRUCT_OPTIONS = ["For", "While", "ListComp", "Recursion"]
+_POLICY_OPTIONS = ["best", "average"]
 _BLANK_PROBLEM = {
     "id": None, "title": "", "description": "", "max_score": 10.0, "penalty_percent_per_submit": 0.0,
     "max_attempts": 3, "function_name": None,
@@ -170,42 +171,73 @@ def page_create_exam(teacher_id: int):
 
     can_add_remove = not locked and not force_unlocked
 
-    col1, col2 = st.columns(2)
-    title = col1.text_input(ui_style.required_label("Tiêu đề bài kiểm tra"), value=(exam_data or {}).get("title", ""))
-    description = col2.text_input("Mô tả ngắn", value=(exam_data or {}).get("description", ""))
+    # Khối thông tin chung là 1 FRAGMENT (không phải st.form): gõ/tick ở đây chỉ chạy lại
+    # riêng khối này, không dựng lại cả trang. Cố ý KHÔNG dùng st.form vì form bắt buộc nút
+    # lưu phải nằm bên trong nó — mà nút lưu cần nằm ở CUỐI trang cho dễ thao tác.
+    # Mọi widget đều có key gắn theo (lớp + bài đang sửa) để phần Lưu ở cuối trang đọc lại
+    # giá trị mới nhất qua st.session_state, và để khi đổi sang bài khác không bị Streamlit
+    # giữ lại giá trị cũ (widget key trùng thì tham số value= bị bỏ qua).
+    mkey = f"oe_meta_{class_id}_{exam_id or 'new'}"
 
-    with st.container(border=True):
-        st.markdown("**:material/settings: Cấu hình chung**")
-        c1, c2, c3 = st.columns(3)
-        allow_editor = c1.checkbox("Cho phép code editor", value=(exam_data or {}).get("allow_code_editor", True))
-        allow_upload = c2.checkbox("Cho phép upload file", value=(exam_data or {}).get("allow_file_upload", True))
-        policy_options = ["best", "average"]
-        default_policy = (exam_data or {}).get("final_score_policy", "best")
-        if default_policy not in policy_options:
-            default_policy = "best"
-        policy = c3.selectbox(
-            "Chính sách điểm", policy_options, index=policy_options.index(default_policy),
-            format_func=lambda p: "Điểm cao nhất" if p == "best" else "Điểm trung bình",
-        )
-        c4, c5 = st.columns(2)
-        duration_minutes = c4.number_input(
-            "Thời lượng làm bài (phút, để 0 = không giới hạn)", min_value=0,
-            value=int((exam_data or {}).get("duration_minutes") or 0),
-        )
-        access_code = c5.text_input(
-            "Mật khẩu riêng cho bài kiểm tra (tuỳ chọn)", value=(exam_data or {}).get("access_code") or "",
-            help="Để trống nếu chỉ cần mã lớp là làm được luôn.",
-        )
+    def _render_exam_meta():
+        with st.container(border=True):
+            st.markdown("**:material/settings: Thông tin & cấu hình chung**")
+            col1, col2 = st.columns(2)
+            col1.text_input(
+                ui_style.required_label("Tiêu đề bài kiểm tra"),
+                value=(exam_data or {}).get("title", ""), key=f"{mkey}_title",
+            )
+            col2.text_input(
+                "Mô tả ngắn", value=(exam_data or {}).get("description", ""), key=f"{mkey}_desc",
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.checkbox(
+                "Cho phép code editor", value=(exam_data or {}).get("allow_code_editor", True),
+                key=f"{mkey}_editor",
+            )
+            c2.checkbox(
+                "Cho phép upload file", value=(exam_data or {}).get("allow_file_upload", True),
+                key=f"{mkey}_upload",
+            )
+            c3.checkbox(
+                "Bật Trợ lý AI", value=(exam_data or {}).get("allow_ai_assistant", False),
+                key=f"{mkey}_ai_assistant", help="Cho phép học sinh chat với AI gia sư để nhận gợi ý."
+            )
+            default_policy = (exam_data or {}).get("final_score_policy", "best")
+            if default_policy not in _POLICY_OPTIONS:
+                default_policy = "best"
+            c4.selectbox(
+                "Chính sách điểm", _POLICY_OPTIONS, index=_POLICY_OPTIONS.index(default_policy),
+                format_func=lambda p: "Điểm cao nhất" if p == "best" else "Điểm trung bình",
+                key=f"{mkey}_policy",
+            )
+            c4, c5 = st.columns(2)
+            c4.number_input(
+                "Thời lượng làm bài (phút, để 0 = không giới hạn)", min_value=0,
+                value=int((exam_data or {}).get("duration_minutes") or 0), key=f"{mkey}_duration",
+            )
+            c5.text_input(
+                "Mật khẩu riêng cho bài kiểm tra (tuỳ chọn)",
+                value=(exam_data or {}).get("access_code") or "", key=f"{mkey}_access",
+                help="Để trống nếu chỉ cần mã lớp là làm được luôn.",
+            )
+
+    _render_exam_meta()
 
     st.subheader("Các câu", icon=":material/checklist:", divider="gray")
     problems_draft = st.session_state[state_key]
-    ver = st.session_state["oe_editor_version"]
 
-    for i, problem in enumerate(problems_draft):
+    def _render_one_problem(i: int):
         # Gắn state_key (namespace theo lớp+bài đang sửa) vào MỌI khoá widget của câu này —
         # nếu chỉ đánh số theo i, chuyển từ "tạo mới" sang "sửa bài khác" sẽ bị Streamlit giữ
         # lại giá trị cũ ở đúng vị trí i đó (widget key trùng thì value= bị bỏ qua), gây hiện
         # tượng ô đầu tiên hiển thị sai dữ liệu khi mở lại 1 bài đã lưu.
+        problems_draft = st.session_state[state_key]
+        if i >= len(problems_draft):
+            return  # câu vừa bị xoá ở nơi khác, fragment này đã cũ
+        problem = problems_draft[i]
+        ver = st.session_state["oe_editor_version"]
         pkey = f"{state_key}_{i}"
         with st.container(border=True):
             header_col, remove_col = st.columns([5, 1])
@@ -399,6 +431,9 @@ def page_create_exam(teacher_id: int):
                 "test_cases": current_test_cases,
             }
 
+    for _i in range(len(problems_draft)):
+        _render_one_problem(_i)
+
     if can_add_remove:
         if st.button("Thêm câu", icon=":material/add:", key="oe_add_problem_btn"):
             problems_draft.append(_new_problem())
@@ -406,8 +441,33 @@ def page_create_exam(teacher_id: int):
             st.rerun()
 
     st.divider()
-    col_save1, col_save2 = st.columns(2)
-    if col_save1.button("Lưu nháp", icon=":material/save:", key="oe_save_draft_btn", use_container_width=True):
+    if st.session_state.get("_oe_saved_msg"):
+        st.success(st.session_state.pop("_oe_saved_msg"), icon=":material/check_circle:")
+
+    col_save, col_pub = st.columns(2)
+    save_clicked = col_save.button(
+        "Lưu bài kiểm tra", type="primary", icon=":material/save:",
+        key="oe_save_btn", use_container_width=True,
+        help="Lưu cả thông tin chung ở trên lẫn toàn bộ các câu.",
+    )
+    if exam_id:
+        is_published = (exam_data or {}).get("is_published", False)
+        label = "Ẩn bài kiểm tra" if is_published else "Công bố"
+        icon = ":material/visibility_off:" if is_published else ":material/publish:"
+        if col_pub.button(label, icon=icon, key="oe_publish_toggle_btn", use_container_width=True):
+            service.set_exam_published(exam_id, teacher_id, not is_published)
+            st.rerun()
+        st.caption("Công bố dùng **bản đã lưu gần nhất** — vừa sửa gì thì bấm Lưu trước.")
+    else:
+        col_pub.caption("Lưu trước, sau đó chọn lại bài vừa tạo để Công bố.")
+
+    if save_clicked:
+        # Đọc lại giá trị mới nhất của khối cấu hình qua session_state (khối đó là fragment
+        # riêng nên biến cục bộ của nó không dùng lại được ở đây).
+        title = st.session_state.get(f"{mkey}_title", "") or ""
+        description = st.session_state.get(f"{mkey}_desc", "") or ""
+        duration_minutes = st.session_state.get(f"{mkey}_duration", 0) or 0
+        access_code = st.session_state.get(f"{mkey}_access", "") or ""
         if not title.strip():
             st.error("Nhập tiêu đề bài kiểm tra.")
         elif not any(p["title"].strip() for p in problems_draft):
@@ -415,25 +475,19 @@ def page_create_exam(teacher_id: int):
         else:
             exam_meta = {
                 "title": title, "description": description,
-                "allow_code_editor": allow_editor, "allow_file_upload": allow_upload,
+                "allow_code_editor": st.session_state.get(f"{mkey}_editor", True),
+                "allow_file_upload": st.session_state.get(f"{mkey}_upload", True),
+                "allow_ai_assistant": st.session_state.get(f"{mkey}_ai_assistant", False),
                 "duration_minutes": duration_minutes or None,
-                "access_code": access_code.strip() or None, "final_score_policy": policy,
+                "access_code": access_code.strip() or None,
+                "final_score_policy": st.session_state.get(f"{mkey}_policy", "best"),
             }
             new_exam_id = service.save_exam(teacher_id, class_id, exam_meta, problems_draft, exam_id)
             st.session_state.pop(state_key, None)
+            # Dọn luôn các khoá widget của khối cấu hình: nếu vừa tạo bài MỚI, namespace
+            # "..._new" còn sót giá trị cũ sẽ tự điền vào lần tạo bài mới kế tiếp.
+            for k in [k for k in st.session_state if k.startswith(f"{mkey}_")]:
+                st.session_state.pop(k, None)
             st.session_state["oe_pending_exam_choice"] = new_exam_id
-            st.session_state["_oe_saved_msg"] = "Đã lưu nháp (chưa công bố cho học sinh)."
+            st.session_state["_oe_saved_msg"] = "Đã lưu bài kiểm tra (chưa công bố cho học sinh)."
             st.rerun()
-
-    if st.session_state.get("_oe_saved_msg"):
-        st.success(st.session_state.pop("_oe_saved_msg"), icon=":material/check_circle:")
-
-    if exam_id:
-        is_published = (exam_data or {}).get("is_published", False)
-        label = "Ẩn bài kiểm tra" if is_published else "Công bố"
-        icon = ":material/visibility_off:" if is_published else ":material/publish:"
-        if col_save2.button(label, icon=icon, key="oe_publish_toggle_btn", type="primary", use_container_width=True):
-            service.set_exam_published(exam_id, teacher_id, not is_published)
-            st.rerun()
-    else:
-        col_save2.caption("Lưu nháp trước, sau đó chọn lại bài vừa tạo để bấm Công bố.")

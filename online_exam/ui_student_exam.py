@@ -56,6 +56,8 @@ def _exam_status_label(exam) -> str:
 
 
 def render_student_flow():
+    ui_style.inject_global_css()
+
     # 1. Thử khôi phục session từ URL (để học sinh F5 không bị mất session)
     if not st.session_state.get(f"{_STATE_PREFIX}student_id"):
         token = st.query_params.get("student_session")
@@ -135,29 +137,40 @@ def _render_scoreboard():
         st.rerun()
     st.caption(full_name)
 
-    exams = service.list_exams_for_student(student_id)
-    if not exams:
+    # Cache bảng điểm trong session_state — tải 1 lần, các lần chuyển màn hình tiếp theo
+    # đọc từ RAM thay vì query lại Supabase qua Internet (mỗi lần trước đây tốn ~4 SQL × 150ms).
+    # Bị xoá tường minh sau mỗi lần HS Nộp bài chính thức hoặc lần đầu vào bài (create_enrollment).
+    board_key = f"{_STATE_PREFIX}board_{student_id}"
+    if board_key not in st.session_state:
+        st.session_state[board_key] = service.get_student_scoreboard(student_id)
+    board = st.session_state[board_key]
+
+    if not board:
         st.info("Lớp chưa có bài kiểm tra nào.", icon=":material/info:")
         return
 
-    for exam in exams:
-        enrollment = service.get_enrollment(exam.id, student_id)
+    for entry in board:
+        exam, summary = entry["exam"], entry["summary"]
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
             c1.markdown(f"**{exam.title}** — {_exam_status_label(exam)}")
             if exam.description:
                 c1.caption(exam.description)
-            if enrollment:
-                summary = service.get_student_exam_summary(exam.id, enrollment.id)
+            if summary is not None:
                 c1.markdown(f"Điểm tổng: **{summary['total_score']:.2f} / {summary['max_total']:.2f}**")
                 for row in summary["problems"]:
                     score_txt = f"{row['score']:.2f}" if row["score"] is not None else "—"
                     c1.caption(f"　{row['title']}: {score_txt} / {row['max_score']:.2f}")
             can_enter_new = _exam_is_open_now(exam)
-            if can_enter_new or enrollment:
+            if can_enter_new or entry["enrolled"]:
                 btn_label = "Vào làm bài" if can_enter_new else "Xem lại"
                 if c2.button(btn_label, key=f"se_enter_{exam.id}", use_container_width=True):
                     st.session_state[f"{_STATE_PREFIX}active_exam_id"] = exam.id
+                    # PRE-FETCH CACHE: Chèn dữ liệu đã load sẵn vào cache để màn hình Làm bài
+                    # mở ra INSTANT (0ms DB delay) thay vì tốn ~300ms query lại.
+                    st.session_state[f"{_STATE_PREFIX}ctx_{exam.id}"] = (exam, entry["enrollment"])
+                    if entry["enrollment"] and all(entry["progress_map"].values()):
+                        st.session_state[f"{_STATE_PREFIX}progress_{entry['enrollment'].id}"] = entry["progress_map"]
                     st.rerun()
 
 
@@ -188,7 +201,13 @@ def _render_take_exam(exam_id: int):
     class_id = st.session_state[f"{_STATE_PREFIX}class_id"]
     student_id = st.session_state[f"{_STATE_PREFIX}student_id"]
 
-    exam = service.get_exam_for_student(exam_id, class_id)
+    # Cache (Exam, Enrollment) — tránh 1 SQL RTT × 150ms mỗi lần rerun trang Làm bài.
+    # Được xoá và tạo lại khi HS vào bài lần đầu (create_enrollment).
+    ctx_key = f"{_STATE_PREFIX}ctx_{exam_id}"
+    if ctx_key not in st.session_state:
+        st.session_state[ctx_key] = service.load_take_exam_context(exam_id, class_id, student_id)
+    exam, enrollment = st.session_state[ctx_key]
+
     if exam is None:
         st.error("Không tìm thấy bài kiểm tra.")
         return
@@ -202,7 +221,6 @@ def _render_take_exam(exam_id: int):
         st.caption(exam.description)
 
     can_enter_new = _exam_is_open_now(exam)
-    enrollment = service.get_enrollment(exam_id, student_id)
 
     if enrollment is None:
         if not can_enter_new:
@@ -218,6 +236,10 @@ def _render_take_exam(exam_id: int):
                 st.error("Sai mật khẩu.")
                 return
         enrollment = service.create_enrollment(exam_id, student_id)
+        # Cập nhật cache ctx với enrollment mới; xoá cache bảng điểm để lần sau
+        # quay về bảng điểm sẽ thấy nút "Xem lại" thay vì "Vào làm bài".
+        st.session_state[ctx_key] = (exam, enrollment)
+        st.session_state.pop(f"{_STATE_PREFIX}board_{student_id}", None)
 
     deadline = service.compute_deadline(exam, enrollment)
     now = datetime.now(timezone.utc)
@@ -232,15 +254,30 @@ def _render_take_exam(exam_id: int):
         st.info(f"Bài kiểm tra {reason} — bạn chỉ xem lại được bài đã làm, không nộp thêm được.",
                 icon=":material/lock:")
 
-    problems = service.load_exam_problems_for_student(exam_id)
+    # Cache danh sách câu hỏi — bất biến trong phiên thi (GV không thể sửa khi đã có bài nộp).
+    problems_key = f"{_STATE_PREFIX}problems_{exam_id}"
+    if problems_key not in st.session_state:
+        st.session_state[problems_key] = service.load_exam_problems_for_student(exam_id)
+    problems = st.session_state[problems_key]
+
     if not problems:
         st.info("Bài kiểm tra chưa có câu nào.", icon=":material/info:")
         return
 
+    # Cache tiến độ tất cả câu — bị xoá sau mỗi lần Nộp bài chính thức (record_official_submission)
+    # để rerun tiếp theo tải lại điểm/lượt nộp mới nhất từ DB.
+    progress_key = f"{_STATE_PREFIX}progress_{enrollment.id}"
+    if progress_key not in st.session_state:
+        st.session_state[progress_key] = service.get_or_create_problem_progress_bulk(
+            enrollment.id, [p["id"] for p in problems]
+        )
+    progress_map = st.session_state[progress_key]
+
     tabs = st.tabs([f"Câu {i + 1}" for i in range(len(problems))])
+    total_problems = len(problems)
     for i, (tab, problem) in enumerate(zip(tabs, problems)):
         with tab:
-            _render_problem_tab(i, exam, enrollment, problem, read_only_all)
+            _render_problem_tab(i, total_problems, exam, enrollment, problem, read_only_all, progress_map[problem["id"]])
 
 
 def _is_redundant_title(title: str, index: int) -> bool:
@@ -250,7 +287,8 @@ def _is_redundant_title(title: str, index: int) -> bool:
     return normalized in (f"câu{index + 1}", f"cau{index + 1}")
 
 
-def _render_problem_tab(index: int, exam, enrollment, problem: dict, read_only_all: bool):
+@st.fragment
+def _render_problem_tab(index: int, total_problems: int, exam, enrollment, problem: dict, read_only_all: bool, progress):
     header = f"Câu {index + 1}"
     title = problem.get("title", "")
     if title and not _is_redundant_title(title, index):
@@ -260,7 +298,6 @@ def _render_problem_tab(index: int, exam, enrollment, problem: dict, read_only_a
         st.markdown(problem["description"])
     st.divider()
 
-    progress = service.get_or_create_problem_progress(enrollment.id, problem["id"])
     sample_tcs = [tc for tc in problem["test_cases"] if tc.get("is_sample")]
     max_attempts = problem.get("max_attempts")
     attempts_left_txt = (
@@ -277,50 +314,121 @@ def _render_problem_tab(index: int, exam, enrollment, problem: dict, read_only_a
     attempts_exhausted = max_attempts is not None and progress.attempts_used >= max_attempts
     is_locked = read_only_all or attempts_exhausted
     pkey = f"se_p_{exam.id}_{problem['id']}"
+    ai_enabled = getattr(exam, "allow_ai_assistant", False)
 
-    if not is_locked:
-        code_text, submission_mode, original_filename = _render_code_input(exam, pkey, progress)
-
-        col_trial, col_submit = st.columns(2)
-        if col_trial.button("Chạy thử (chỉ test mẫu)", key=f"{pkey}_trial_btn", use_container_width=True):
-            if not code_text.strip():
-                st.error("Chưa có code để chạy thử.")
-            else:
-                with st.spinner("Đang chấm thử..."):
-                    result = grading.grade_problem(code_text, problem, sample_tcs)
-                service.record_trial_submission(progress.id, submission_mode, code_text, original_filename, result)
-                _render_trial_result(result, sample_tcs)
-
-        if col_submit.button("Nộp câu này", type="primary", key=f"{pkey}_submit_btn", use_container_width=True):
-            if not code_text.strip():
-                st.error("Chưa có code để nộp.")
-            else:
-                with st.spinner("Đang chấm bài..."):
-                    result = grading.grade_problem(code_text, problem, problem["test_cases"])
-                try:
-                    submission = service.record_official_submission(
-                        progress.id, problem, exam, enrollment, submission_mode, code_text, original_filename, result,
-                    )
-                except service.SubmissionBlocked as e:
-                    st.error(str(e), icon=":material/block:")
-                else:
-                    n_sample = len(sample_tcs)
-                    sample_pass = sum(1 for r in result["results"] if r["is_sample"] and r["passed"])
-                    hidden_total = len(result["results"]) - n_sample
-                    hidden_pass = sum(1 for r in result["results"] if not r["is_sample"] and r["passed"])
-                    st.success(
-                        f"Đã nộp — điểm lần này: {float(submission.final_score):.2f}/{problem['max_score']:.2f} "
-                        f"(test mẫu {sample_pass}/{n_sample}, test ẩn {hidden_pass}/{hidden_total})",
-                        icon=":material/check_circle:",
-                    )
-                    st.rerun()
+    if ai_enabled:
+        col_code, col_chat = st.columns([3, 2])
     else:
-        reason = "hết thời gian làm bài" if read_only_all else "đã dùng hết lượt nộp"
-        st.info(f"Câu này hiện chỉ xem được ({reason}) — không nộp thêm được.", icon=":material/lock:")
+        col_code = st.container()
+        col_chat = None
+
+    code_text = ""
+    with col_code:
+        if not is_locked:
+            code_text, submission_mode, original_filename = _render_code_input(exam, pkey, progress)
+
+            col_trial, col_submit = st.columns(2)
+            if col_trial.button("Chạy thử (chỉ test mẫu)", key=f"{pkey}_trial_btn", use_container_width=True):
+                if not code_text.strip():
+                    st.error("Chưa có code để chạy thử.")
+                else:
+                    with st.spinner("Đang chấm thử..."):
+                        result = grading.grade_problem(code_text, problem, sample_tcs)
+                    st.session_state[f"{pkey}_latest_trial_result"] = result
+                    service.record_trial_submission(progress.id, submission_mode, code_text, original_filename, result)
+                    _render_trial_result(result, sample_tcs)
+
+            if col_submit.button("Nộp câu này", type="primary", key=f"{pkey}_submit_btn", use_container_width=True):
+                if not code_text.strip():
+                    st.error("Chưa có code để nộp.")
+                else:
+                    with st.spinner("Đang chấm bài..."):
+                        result = grading.grade_problem(code_text, problem, problem["test_cases"])
+                    try:
+                        submission = service.record_official_submission(
+                            progress.id, problem, exam, enrollment, submission_mode, code_text, original_filename, result,
+                        )
+                    except service.SubmissionBlocked as e:
+                        st.error(str(e), icon=":material/block:")
+                    else:
+                        n_sample = len(sample_tcs)
+                        sample_pass = sum(1 for r in result["results"] if r["is_sample"] and r["passed"])
+                        hidden_total = len(result["results"]) - n_sample
+                        hidden_pass = sum(1 for r in result["results"] if not r["is_sample"] and r["passed"])
+                        st.success(
+                            f"Đã nộp — điểm lần này: {float(submission.final_score):.2f}/{problem['max_score']:.2f} "
+                            f"(test mẫu {sample_pass}/{n_sample}, test ẩn {hidden_pass}/{hidden_total})",
+                            icon=":material/check_circle:",
+                        )
+                        # Xoá cache tiến độ + bảng điểm để full rerun tiếp theo tải lại điểm/lượt
+                        # nộp mới nhất từ DB, thay vì đọc dữ liệu cũ từ session_state.
+                        _sid = st.session_state.get(f"{_STATE_PREFIX}student_id")
+                        st.session_state.pop(f"{_STATE_PREFIX}progress_{enrollment.id}", None)
+                        st.session_state.pop(f"{_STATE_PREFIX}board_{_sid}", None)
+                        st.rerun(scope="app")
+        else:
+            reason = "hết thời gian làm bài" if read_only_all else "đã dùng hết lượt nộp"
+            st.info(f"Câu này hiện chỉ xem được ({reason}) — không nộp thêm được.", icon=":material/lock:")
+            code_text = progress.draft_code or ""
+
+    if col_chat is not None:
+        with col_chat:
+            latest_trial = st.session_state.get(f"{pkey}_latest_trial_result")
+            _render_ai_chat_panel(exam, enrollment, problem, code_text, pkey, latest_trial)
 
     if progress.best_submission_id:
+        # KHÔNG dùng lại mẹo "chỉ query khi expander đang mở": st.expander(key=...) KHÔNG ghi
+        # trạng thái đóng/mở vào session_state, nên điều kiện đó luôn sai và HS chỉ thấy khung
+        # rỗng. Thay vào đó cứ vẽ bình thường — chi phí đã được xử lý bằng cách cache
+        # service.get_submission_with_results (dữ liệu bài đã nộp là bất biến sau khi ghi).
         with st.expander("Xem bài đã nộp (bản được tính điểm)", icon=":material/history:"):
             _render_official_review(progress.best_submission_id, problem, sample_tcs)
+
+    # Thanh điều hướng câu trước / câu tiếp theo ở cuối trang
+    if total_problems > 1:
+        st.divider()
+        nav_prev_col, _, nav_next_col = st.columns([2, 3, 2])
+        if index > 0:
+            if nav_prev_col.button(f"← Câu {index}", key=f"{pkey}_nav_prev", use_container_width=True):
+                st.components.v1.html(
+                    f"""
+                    <script>
+                    function switchTab() {{
+                        const doc = window.parent.document;
+                        const tabs = doc.querySelectorAll('div[data-testid="stTabs"] [role="tab"], div[data-testid="stTabs"] button[data-baseweb="tab"]');
+                        if (tabs && tabs[{index - 1}]) {{
+                            tabs[{index - 1}].click();
+                            window.parent.scrollTo({{ top: 0, behavior: 'smooth' }});
+                        }}
+                    }}
+                    switchTab();
+                    setTimeout(switchTab, 50);
+                    </script>
+                    """,
+                    height=0,
+                    width=0,
+                )
+
+        if index < total_problems - 1:
+            if nav_next_col.button(f"Câu {index + 2} →", type="primary", key=f"{pkey}_nav_next", use_container_width=True):
+                st.components.v1.html(
+                    f"""
+                    <script>
+                    function switchTab() {{
+                        const doc = window.parent.document;
+                        const tabs = doc.querySelectorAll('div[data-testid="stTabs"] [role="tab"], div[data-testid="stTabs"] button[data-baseweb="tab"]');
+                        if (tabs && tabs[{index + 1}]) {{
+                            tabs[{index + 1}].click();
+                            window.parent.scrollTo({{ top: 0, behavior: 'smooth' }});
+                        }}
+                    }}
+                    switchTab();
+                    setTimeout(switchTab, 50);
+                    </script>
+                    """,
+                    height=0,
+                    width=0,
+                )
 
 
 def _render_code_input(exam, pkey: str, progress):
@@ -357,6 +465,11 @@ def _render_code_input(exam, pkey: str, progress):
 import html
 
 def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) -> str:
+    """CHỈ ĐƯỢC gọi với test case MẪU (is_sample=True) — bảng này hiện chi tiết đầy đủ (mong
+    đợi/thực tế/đạt-hay-không) cho từng dòng, không có cơ chế che giấu. Test ẩn phải được lọc
+    ra TRƯỚC khi gọi hàm này (xem _render_official_review) và chỉ báo tổng số đúng/tổng dạng
+    aggregate — không được đưa test ẩn vào đây dù chỉ để che cột 'Mong đợi', vì cột 'Thực tế'
+    và 'Kết quả' (Đạt/Chưa đạt) vẫn sẽ lộ ra."""
     table_html = """<style>
 .result-table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 0.95rem; }
 .result-table th, .result-table td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }
@@ -379,49 +492,38 @@ def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) ->
 <tbody>
 """
     
-    # Sắp xếp: test mẫu lên trước, test ẩn xuống cuối
-    sorted_tcs = sorted(test_cases, key=lambda tc: not tc.get("is_sample", False))
-    
-    for i, tc in enumerate(sorted_tcs, start=1):
+    for i, tc in enumerate(test_cases, start=1):
         tc_id = tc.get("id")
         res = results_by_tc_id.get(tc_id)
         if not res:
             continue
-            
+
         passed = res['passed']
-        is_sample = tc.get('is_sample', False)
-        
         row_class = "row-pass" if passed else "row-fail"
         text_class = "text-pass" if passed else "text-fail"
         result_text = "Đạt" if passed else "Chưa đạt"
-        
+
         actual = res.get('actual_output') or ""
         error_msg = res.get('error_message') or ""
         actual_display = actual.strip()
         if not actual_display and error_msg:
             actual_display = f"Lỗi: {error_msg}"
-            
         actual_html = f"<div class='code-font'>{html.escape(actual_display)}</div>"
-        
-        if is_sample:
-            expected_txt = tc.get("expected_output") or (
-                json.dumps(tc.get("expected_return"), ensure_ascii=False)
-                if tc.get("expected_return") is not None else ""
-            )
-            expected_html = f"<div class='code-font'>{html.escape(expected_txt)}</div>"
-            note_str = ""  # Ẩn note của test mẫu theo yêu cầu
-        else:
-            expected_html = "<i style='color: #9ca3af;'>Đã ẩn</i>"
-            note_str = f"<br><span style='font-size: 0.8rem; color: #6b7280;'>Test ẩn</span>"
-        
+
+        expected_txt = tc.get("expected_output") or (
+            json.dumps(tc.get("expected_return"), ensure_ascii=False)
+            if tc.get("expected_return") is not None else ""
+        )
+        expected_html = f"<div class='code-font'>{html.escape(expected_txt)}</div>"
+
         table_html += f"""<tr class="{row_class}">
-<td>{i}{note_str}</td>
+<td>{i}</td>
 <td>{expected_html}</td>
 <td>{actual_html}</td>
 <td class="{text_class}">{result_text}</td>
 </tr>
 """
-        
+
     table_html += "</tbody></table>"
     return table_html
 
@@ -446,17 +548,22 @@ def _render_official_review(submission_id: int, problem: dict, sample_tcs: list[
         return
     st.markdown(f"Điểm: **{float(submission.final_score):.2f} / {problem['max_score']:.2f}**")
 
+    # Test ẩn KHÔNG được đưa vào bảng chi tiết (xem docstring _build_results_table_html) —
+    # chỉ báo tổng số đúng/tổng dạng aggregate, đúng quy tắc đã chốt từ đầu dự án.
+    sample_ids = {tc["id"] for tc in sample_tcs}
     results_by_tc_id = {
-        r.test_case_id: {
-            "passed": r.passed,
-            "actual_output": r.actual_output,
-            "error_message": r.error_message
-        }
-        for r in results
+        r.test_case_id: {"passed": r.passed, "actual_output": r.actual_output, "error_message": r.error_message}
+        for r in results if r.test_case_id in sample_ids
     }
-    
-    html_str = _build_results_table_html(problem["test_cases"], results_by_tc_id)
-    st.markdown(html_str, unsafe_allow_html=True)
+    if sample_tcs:
+        html_str = _build_results_table_html(sample_tcs, results_by_tc_id)
+        st.markdown(html_str, unsafe_allow_html=True)
+
+    hidden_results = [r for r in results if r.test_case_id not in sample_ids]
+    if hidden_results:
+        hidden_pass = sum(1 for r in hidden_results if r.passed)
+        st.info(f"Test ẩn: {hidden_pass}/{len(hidden_results)} đúng (không hiển thị chi tiết).",
+                icon=":material/visibility_off:")
 
     file_name = submission.original_filename or f"{(problem['title'] or 'bai_lam').replace(' ', '_')}.py"
     st.download_button(
@@ -466,3 +573,83 @@ def _render_official_review(submission_id: int, problem: dict, sample_tcs: list[
     if submission.submission_mode == "editor":
         with st.expander("Xem code đã nộp", icon=":material/code:"):
             st.code(submission.code_text, language="python")
+
+
+def _render_ai_chat_panel(exam, enrollment, problem: dict, code_text: str, pkey: str, trial_result: dict | None = None):
+    """Bảng điều khiển AI Chatbox (cột bên phải).
+    Được tối ưu chiều cao 280px để nằm vừa vặn song song với khung Code Editor (100% zoom không cần cuộn trang).
+    Tin nhắn User nằm bên PHẢI, AI nằm bên TRÁI. Spinner 'AI đang suy nghĩ' nằm trực tiếp trong khung chat.
+    Truyền trial_result giúp AI đọc được toàn bộ log lỗi chạy thử gần nhất của học sinh."""
+    chat_key = f"{_STATE_PREFIX}chat_{enrollment.id}_{problem['id']}"
+    if chat_key not in st.session_state:
+        st.session_state[chat_key] = []
+
+    # CSS Tùy chỉnh: Đưa tin nhắn User sang bên PHẢI, AI sang bên TRÁI
+    st.markdown("""
+    <style>
+    /* Tin nhắn User: Đưa sang bên PHẢI, bong bóng màu xanh nhạt */
+    div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]),
+    div[data-testid="stChatMessage"]:has(div[aria-label="Chat message from user"]),
+    div[data-testid="stChatMessage"]:has(span[aria-label="user"]) {
+        flex-direction: row-reverse !important;
+        text-align: right !important;
+    }
+    div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div[data-testid="stChatMessageContent"],
+    div[data-testid="stChatMessage"]:has(div[aria-label="Chat message from user"]) div[data-testid="stChatMessageContent"] {
+        background-color: #e3f2fd !important;
+        border-radius: 14px 14px 2px 14px !important;
+        padding: 8px 12px !important;
+        color: #0d47a1 !important;
+    }
+    /* Tin nhắn AI: Ở bên TRÁI, bong bóng màu xám viền nhẹ */
+    div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) div[data-testid="stChatMessageContent"],
+    div[data-testid="stChatMessage"]:has(div[aria-label="Chat message from assistant"]) div[data-testid="stChatMessageContent"] {
+        background-color: #f8f9fa !important;
+        border-radius: 14px 14px 14px 2px !important;
+        border: 1px solid #e9ecef !important;
+        padding: 8px 12px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("##### 🤖 Trợ lý AI (Gia sư ảo)")
+
+    pending_key = f"{pkey}_pending_prompt"
+
+    # Khung cuộn chứa các tin nhắn — chiều cao 280px khớp hoàn hảo với chiều cao nút Nộp bài bên trái
+    with st.container(height=280, border=True):
+        if not st.session_state[chat_key] and not st.session_state.get(pending_key):
+            st.caption("💬 Chưa có tin nhắn nào. Bạn hãy nhập câu hỏi bên dưới để hỏi AI gợi ý nhé!")
+        
+        # Hiển thị lịch sử tin nhắn đã lưu
+        for msg in st.session_state[chat_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Nếu có tin nhắn vừa nhập đang chờ xử lý
+        if pending_prompt := st.session_state.get(pending_key):
+            # 1. Hiển thị ngay câu hỏi của user ở bên phải
+            with st.chat_message("user"):
+                st.markdown(pending_prompt)
+            
+            # 2. Hiển thị spinner "AI đang suy nghĩ" TRỰC TIẾP bên trong khung chat
+            with st.chat_message("assistant"):
+                with st.spinner("AI đang suy nghĩ..."):
+                    from online_exam.ai_service import ask_ai_tutor
+                    ai_response = ask_ai_tutor(
+                        problem, code_text,
+                        st.session_state[chat_key], pending_prompt,
+                        trial_result=trial_result
+                    )
+            
+            # 3. Lưu kết quả và dọn dẹp pending state
+            st.session_state[chat_key].append({"role": "user", "content": pending_prompt})
+            st.session_state[chat_key].append({"role": "assistant", "content": ai_response})
+            st.session_state.pop(pending_key, None)
+            st.rerun(scope="fragment")
+
+    # Ô nhập tin nhắn
+    if user_prompt := st.chat_input("Hỏi AI gợi ý về code...", key=f"{pkey}_ai_input"):
+        st.session_state[pending_key] = user_prompt
+        st.rerun(scope="fragment")
+

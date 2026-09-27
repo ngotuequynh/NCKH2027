@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 def _inject_tab_hack():
-    # Hack để cho phép gõ phím Tab trong textarea của Streamlit (mặc định Tab sẽ chuyển focus)
+    # Hack cho phép gõ phím Tab trong textarea và tự động lọc danh sách khi gõ trong ô tìm kiếm (stTextInput)
     components.html(
         """
         <script>
@@ -24,14 +24,28 @@ def _inject_tab_hack():
                 const ta = e.target;
                 const start = ta.selectionStart;
                 const end = ta.selectionEnd;
-                // Chèn 4 dấu cách
                 ta.value = ta.value.substring(0, start) + "    " + ta.value.substring(end);
-                // Đặt lại con trỏ
                 ta.selectionStart = ta.selectionEnd = start + 4;
-                // Kích hoạt sự kiện input để React của Streamlit nhận diện thay đổi
                 ta.dispatchEvent(new Event('input', {bubbles: true}));
             }
         });
+
+        // Tự động kích hoạt lọc danh sách ngay khi gõ vào ô tìm kiếm (không cần bấm Enter/click ra ngoài)
+        let _liveSearchTimer = null;
+        doc.addEventListener('input', function(e) {
+            const input = e.target;
+            if (input && input.tagName.toLowerCase() === 'input') {
+                const container = input.closest('div[data-testid="stTextInput"]');
+                if (container) {
+                    clearTimeout(_liveSearchTimer);
+                    _liveSearchTimer = setTimeout(function() {
+                        input.dispatchEvent(new KeyboardEvent('keydown', {
+                            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                        }));
+                    }, 250);
+                }
+            }
+        }, { passive: true });
         </script>
         """,
         height=0,
@@ -58,10 +72,24 @@ def inject_global_css():
                 font-weight: 500 !important;
             }
 
-            /* Chữ báo lỗi đậm/đỏ rõ hơn mặc định của Streamlit */
-            div[data-testid="stAlert"] p,
-            div[data-testid="stAlertContentError"] p,
-            div[data-testid="stAlertContentError"] {
+            /* Phân loại màu chữ chuẩn cho từng loại thông báo (Success=Xanh lá, Info=Xanh dương, Warning=Vàng, Error=Đỏ) */
+            div[data-testid="stAlert"]:has(div[data-testid="stAlertContentSuccess"]) p,
+            div[data-testid="stAlertContentSuccess"] p, div[data-testid="stAlertContentSuccess"] {
+                color: #15803D !important;
+                font-weight: 600 !important;
+            }
+            div[data-testid="stAlert"]:has(div[data-testid="stAlertContentInfo"]) p,
+            div[data-testid="stAlertContentInfo"] p, div[data-testid="stAlertContentInfo"] {
+                color: #1D4ED8 !important;
+                font-weight: 600 !important;
+            }
+            div[data-testid="stAlert"]:has(div[data-testid="stAlertContentWarning"]) p,
+            div[data-testid="stAlertContentWarning"] p, div[data-testid="stAlertContentWarning"] {
+                color: #B45309 !important;
+                font-weight: 600 !important;
+            }
+            div[data-testid="stAlert"]:has(div[data-testid="stAlertContentError"]) p,
+            div[data-testid="stAlertContentError"] p, div[data-testid="stAlertContentError"] {
                 color: #B91C1C !important;
                 font-weight: 600 !important;
             }
@@ -340,19 +368,87 @@ def inject_global_css():
                 color: #16A34A !important;
             }
 
-            /* ====== Tab ngang danh sách câu (trang Làm bài của HS) — giãn cách + tăng vùng
-               bấm, mặc định Streamlit hơi sát nhau, dễ bấm nhầm câu khác trên di động ====== */
-            [data-baseweb="tab-list"] {
-                gap: 6px !important;
-                margin-bottom: 10px !important;
+            /* ====== TAB NGANG DANH SÁCH CÂU (Trang Làm bài của HS & Các tab chung trong app) ======
+               Biến các tab nhỏ phẳng mặc định thành các NÚT THẺ NỔI (Pill Cards) to, rõ nét,
+               nổi bật 100% khi active, dễ nhìn và chống bấm nhầm trên di động/máy tính. */
+            div[data-testid="stTabs"] [data-baseweb="tab-list"],
+            div[data-testid="stTabs"] [role="tablist"],
+            [data-baseweb="tab-list"],
+            [role="tablist"] {
+                gap: 12px !important;
+                margin-bottom: 20px !important;
+                background-color: #F1F5F9 !important;
+                padding: 10px 14px !important;
+                border-radius: 14px !important;
+                border: 2px solid #CBD5E1 !important;
             }
-            button[data-baseweb="tab"] {
-                padding: 10px 22px !important;
-                font-size: 1.05rem !important;
-                font-weight: 600 !important;
+
+            div[data-testid="stTabs"] [data-baseweb="tab"],
+            div[data-testid="stTabs"] [role="tab"],
+            button[data-baseweb="tab"],
+            div[data-baseweb="tab"],
+            [role="tab"] {
+                padding: 14px 32px !important;
+                height: auto !important;
+                border-radius: 10px !important;
+                background-color: #FFFFFF !important;
+                border: 2px solid #94A3B8 !important;
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06) !important;
             }
-            [data-baseweb="tab-highlight"] {
-                height: 3px !important;
+
+            div[data-testid="stTabs"] [data-baseweb="tab"] *,
+            div[data-testid="stTabs"] [role="tab"] *,
+            [data-baseweb="tab"] *,
+            [role="tab"] * {
+                font-size: 1.3rem !important;
+                font-weight: 800 !important;
+                color: #1E293B !important;
+            }
+
+            div[data-testid="stTabs"] [data-baseweb="tab"]:hover,
+            div[data-testid="stTabs"] [role="tab"]:hover,
+            [data-baseweb="tab"]:hover,
+            [role="tab"]:hover {
+                background-color: #DBEAFE !important;
+                border-color: #2563EB !important;
+                transform: translateY(-2px) !important;
+            }
+
+            div[data-testid="stTabs"] [data-baseweb="tab"]:hover *,
+            div[data-testid="stTabs"] [role="tab"]:hover *,
+            [data-baseweb="tab"]:hover *,
+            [role="tab"]:hover * {
+                color: #1D4ED8 !important;
+            }
+
+            div[data-testid="stTabs"] [aria-selected="true"],
+            div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"],
+            div[data-testid="stTabs"] [role="tab"][aria-selected="true"],
+            [data-baseweb="tab"][aria-selected="true"],
+            [role="tab"][aria-selected="true"] {
+                background-color: #2563EB !important;
+                border-color: #2563EB !important;
+                box-shadow: 0 4px 14px rgba(37, 99, 235, 0.45) !important;
+                transform: translateY(-2px) !important;
+            }
+
+            div[data-testid="stTabs"] [aria-selected="true"] *,
+            div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] *,
+            div[data-testid="stTabs"] [role="tab"][aria-selected="true"] *,
+            [data-baseweb="tab"][aria-selected="true"] *,
+            [role="tab"][aria-selected="true"] * {
+                color: #FFFFFF !important;
+            }
+
+            /* Ẩn gạch chân mỏng cũ vì đã dùng Pill Card nổi */
+            div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+            [data-baseweb="tab-highlight"],
+            div[data-testid="stTabs"] [data-baseweb="tab-border"],
+            [data-baseweb="tab-border"] {
+                display: none !important;
+                visibility: hidden !important;
+                height: 0 !important;
             }
         </style>
         """,
