@@ -295,7 +295,9 @@ def _render_problem_tab(index: int, total_problems: int, exam, enrollment, probl
         header += f": {title}"
     st.markdown(f"#### {header}")
     if problem.get("description"):
-        st.markdown(problem["description"])
+        desc = problem["description"].replace("\r\n", "\n").replace("\n", "  \n")
+        st.markdown(desc, unsafe_allow_html=True)
+
     st.divider()
 
     sample_tcs = [tc for tc in problem["test_cases"] if tc.get("is_sample")]
@@ -310,6 +312,9 @@ def _render_problem_tab(index: int, total_problems: int, exam, enrollment, probl
     m1.metric("Điểm tối đa", f"{problem['max_score']:.2f}")
     m2.metric("Lượt nộp còn lại", attempts_left_txt)
     m3.metric("Điểm cao nhất hiện tại", best_txt)
+
+    if sample_tcs:
+        st.markdown(_build_sample_test_cases_preview_html(sample_tcs), unsafe_allow_html=True)
 
     attempts_exhausted = max_attempts is not None and progress.attempts_used >= max_attempts
     is_locked = read_only_all or attempts_exhausted
@@ -374,7 +379,7 @@ def _render_problem_tab(index: int, total_problems: int, exam, enrollment, probl
     if col_chat is not None:
         with col_chat:
             latest_trial = st.session_state.get(f"{pkey}_latest_trial_result")
-            _render_ai_chat_panel(exam, enrollment, problem, code_text, pkey, latest_trial)
+            _render_ai_chat_panel(exam, enrollment, problem, code_text, pkey, latest_trial, sample_tcs)
 
     if progress.best_submission_id:
         # KHÔNG dùng lại mẹo "chỉ query khi expander đang mở": st.expander(key=...) KHÔNG ghi
@@ -464,6 +469,49 @@ def _render_code_input(exam, pkey: str, progress):
 
 import html
 
+def _build_sample_test_cases_preview_html(sample_tcs: list[dict]) -> str:
+    table_html = """<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+<style>
+.material-symbols-rounded { font-family: 'Material Symbols Rounded'; font-weight: normal; font-style: normal; font-size: 20px; line-height: 1; letter-spacing: normal; text-transform: none; display: inline-block; white-space: nowrap; word-wrap: normal; direction: ltr; -webkit-font-smoothing: antialiased; }
+.sample-tc-table { width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 16px; font-size: 0.95rem; }
+.sample-tc-table th, .sample-tc-table td { border: 1px solid #e2e8f0; padding: 10px; text-align: left; }
+.sample-tc-table th { background-color: #f1f5f9; font-weight: 600; color: #1e293b; }
+.sample-tc-table tr:nth-child(even) { background-color: #f8fafc; }
+.code-font { font-family: monospace; white-space: pre-wrap; }
+</style>
+<div style="font-weight: 700; margin-top: 10px; margin-bottom: 6px; color: #1e293b; display: flex; align-items: center; gap: 6px;"><span class="material-symbols-rounded" style="font-size: 20px; color: #2563EB;">fact_check</span> Test case mẫu</div>
+<table class="sample-tc-table">
+<thead>
+<tr>
+<th style="width: 8%;">#</th>
+<th style="width: 46%;">Dữ liệu vào (Input)</th>
+<th style="width: 46%;">Mong đợi (Output / Return)</th>
+</tr>
+</thead>
+<tbody>
+"""
+    for i, tc in enumerate(sample_tcs, start=1):
+        input_txt = tc.get("input") or (
+            json.dumps(tc.get("call_args"), ensure_ascii=False)
+            if tc.get("call_args") is not None else ""
+        )
+        input_html = f"<div class='code-font'>{html.escape(input_txt)}</div>"
+
+        expected_txt = tc.get("expected_output") or (
+            json.dumps(tc.get("expected_return"), ensure_ascii=False)
+            if tc.get("expected_return") is not None else ""
+        )
+        expected_html = f"<div class='code-font'>{html.escape(expected_txt)}</div>"
+
+        table_html += f"""<tr>
+<td><strong>{i}</strong></td>
+<td>{input_html}</td>
+<td>{expected_html}</td>
+</tr>
+"""
+    table_html += "</tbody></table>"
+    return table_html
+
 def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) -> str:
     """CHỈ ĐƯỢC gọi với test case MẪU (is_sample=True) — bảng này hiện chi tiết đầy đủ (mong
     đợi/thực tế/đạt-hay-không) cho từng dòng, không có cơ chế che giấu. Test ẩn phải được lọc
@@ -483,10 +531,11 @@ def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) ->
 <table class="result-table">
 <thead>
 <tr>
-<th style="width: 10%;">Test</th>
-<th style="width: 35%;">Mong đợi</th>
-<th style="width: 35%;">Thực tế</th>
-<th style="width: 20%;">Kết quả</th>
+<th style="width: 8%;">Test</th>
+<th style="width: 28%;">Dữ liệu vào (Input)</th>
+<th style="width: 28%;">Mong đợi</th>
+<th style="width: 24%;">Thực tế</th>
+<th style="width: 12%;">Kết quả</th>
 </tr>
 </thead>
 <tbody>
@@ -503,6 +552,12 @@ def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) ->
         text_class = "text-pass" if passed else "text-fail"
         result_text = "Đạt" if passed else "Chưa đạt"
 
+        input_txt = tc.get("input") or (
+            json.dumps(tc.get("call_args"), ensure_ascii=False)
+            if tc.get("call_args") is not None else ""
+        )
+        input_html = f"<div class='code-font'>{html.escape(input_txt)}</div>"
+
         actual = res.get('actual_output') or ""
         error_msg = res.get('error_message') or ""
         actual_display = actual.strip()
@@ -518,6 +573,7 @@ def _build_results_table_html(test_cases: list[dict], results_by_tc_id: dict) ->
 
         table_html += f"""<tr class="{row_class}">
 <td>{i}</td>
+<td>{input_html}</td>
 <td>{expected_html}</td>
 <td>{actual_html}</td>
 <td class="{text_class}">{result_text}</td>
@@ -575,11 +631,12 @@ def _render_official_review(submission_id: int, problem: dict, sample_tcs: list[
             st.code(submission.code_text, language="python")
 
 
-def _render_ai_chat_panel(exam, enrollment, problem: dict, code_text: str, pkey: str, trial_result: dict | None = None):
+def _render_ai_chat_panel(exam, enrollment, problem: dict, code_text: str, pkey: str, trial_result: dict | None = None, sample_tcs: list | None = None):
     """Bảng điều khiển AI Chatbox (cột bên phải).
     Được tối ưu chiều cao 280px để nằm vừa vặn song song với khung Code Editor (100% zoom không cần cuộn trang).
     Tin nhắn User nằm bên PHẢI, AI nằm bên TRÁI. Spinner 'AI đang suy nghĩ' nằm trực tiếp trong khung chat.
-    Truyền trial_result giúp AI đọc được toàn bộ log lỗi chạy thử gần nhất của học sinh."""
+    Truyền trial_result giúp AI đọc được toàn bộ log lỗi chạy thử gần nhất của học sinh.
+    Truyền sample_tcs giúp AI biết trước test case mẫu ngay cả khi chưa chạy thử."""
     chat_key = f"{_STATE_PREFIX}chat_{enrollment.id}_{problem['id']}"
     if chat_key not in st.session_state:
         st.session_state[chat_key] = []
@@ -639,7 +696,8 @@ def _render_ai_chat_panel(exam, enrollment, problem: dict, code_text: str, pkey:
                     ai_response = ask_ai_tutor(
                         problem, code_text,
                         st.session_state[chat_key], pending_prompt,
-                        trial_result=trial_result
+                        trial_result=trial_result,
+                        sample_tcs=sample_tcs,
                     )
             
             # 3. Lưu kết quả và dọn dẹp pending state

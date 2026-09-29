@@ -16,7 +16,9 @@ import streamlit as st
 from grader.ast_checker import check_structure
 from grader.models import TestCase
 from grader.runner import grade_one, run_capture_only, run_function_capture_only
+from grader.templates_store import save_template as _save_template_to_store
 from online_exam import service, ui_style
+
 
 CONSTRUCT_OPTIONS = ["For", "While", "ListComp", "Recursion"]
 _POLICY_OPTIONS = ["best", "average"]
@@ -179,6 +181,7 @@ def page_create_exam(teacher_id: int):
     # giữ lại giá trị cũ (widget key trùng thì tham số value= bị bỏ qua).
     mkey = f"oe_meta_{class_id}_{exam_id or 'new'}"
 
+    @st.fragment
     def _render_exam_meta():
         with st.container(border=True):
             st.markdown("**:material/settings: Thông tin & cấu hình chung**")
@@ -228,6 +231,7 @@ def page_create_exam(teacher_id: int):
     st.subheader("Các câu", icon=":material/checklist:", divider="gray")
     problems_draft = st.session_state[state_key]
 
+    @st.fragment
     def _render_one_problem(i: int):
         # Gắn state_key (namespace theo lớp+bài đang sửa) vào MỌI khoá widget của câu này —
         # nếu chỉ đánh số theo i, chuyển từ "tạo mới" sang "sửa bài khác" sẽ bị Streamlit giữ
@@ -250,10 +254,89 @@ def page_create_exam(teacher_id: int):
 
             pc1, pc2, pc3 = st.columns(3)
             p_title = pc1.text_input(ui_style.required_label("Tên câu"), value=problem.get("title", ""), key=f"oe_p_title_{pkey}")
-            p_description = st.text_area(
-                "Mô tả / đề bài cho câu này (học sinh sẽ thấy khi mở đúng câu này)",
-                value=problem.get("description", ""), height=120, key=f"oe_p_desc_{pkey}",
-            )
+
+            # Label + thanh công cụ định dạng
+            st.markdown("<small style='color:#6B7280;'><b>Mô tả / Đề bài</b> — Chọn chữ rồi bấm nút hoặc dùng phím tắt. Cột phải là xem trước.</small>", unsafe_allow_html=True)
+            # Toolbar HTML + JS phím tắt (scope theo placeholder để không ảnh hưởng textarea khác)
+            st.components.v1.html(f"""
+<style>
+.fmt-bar {{ display:flex; gap:5px; align-items:center; padding:4px 0; flex-wrap:wrap; }}
+.fmt-btn {{
+    background:#f1f5f9; border:1px solid #cbd5e1; border-radius:6px;
+    padding:3px 10px; cursor:pointer; font-size:14px; line-height:1.6;
+    font-family:sans-serif; transition:background .15s;
+    min-width:30px; text-align:center;
+}}
+.fmt-btn:hover {{ background:#dbeafe; border-color:#3b82f6; color:#1d4ed8; }}
+.fmt-divider {{ color:#d1d5db; font-size:18px; margin:0 2px; }}
+.fmt-hint {{ color:#9ca3af; font-size:11px; margin-left:4px; }}
+</style>
+<div class="fmt-bar">
+    <button class="fmt-btn" onclick="applyFmt('**','**')" title="Đậm — Ctrl+B"><b>B</b></button>
+    <button class="fmt-btn" onclick="applyFmt('*','*')"  title="Nghiêng — Ctrl+I"><i>I</i></button>
+    <button class="fmt-btn" onclick="applyFmt('<u>','</u>')" title="Gạch chân — Ctrl+U"><u>U</u></button>
+    <span class="fmt-divider">|</span>
+    <button class="fmt-btn" onclick="applyFmt('<center>','</center>')" title="Căn giữa — Ctrl+E" style="font-size:16px;">&#8801;</button>
+    <button class="fmt-btn" onclick="applyFmt('\\n- ','\\n')" title="Danh sách">&#8226; List</button>
+    <button class="fmt-btn" onclick="applyFmt('`','`')" title="Code inline">&#96;code&#96;</button>
+    <span class="fmt-divider">|</span>
+    <span class="fmt-hint">Ctrl+B &nbsp;Ctrl+I &nbsp;Ctrl+U &nbsp;Ctrl+E (căn giữa)</span>
+</div>
+<script>
+(function() {{
+    var PLACEHOLDER_HINT = 'VD:';
+    function getDescTA() {{
+        var tas = window.parent.document.querySelectorAll('textarea');
+        for (var i = 0; i < tas.length; i++) {{
+            if (tas[i].placeholder && tas[i].placeholder.startsWith(PLACEHOLDER_HINT)) return tas[i];
+        }}
+        return null;
+    }}
+    function applyFmt(before, after) {{
+        var ta = getDescTA();
+        if (!ta) {{ return; }}
+        var s = ta.selectionStart, e = ta.selectionEnd;
+        var selected = ta.value.substring(s, e);
+        var newVal = ta.value.substring(0, s) + before + selected + after + ta.value.substring(e);
+        var nativeInputSetter = Object.getOwnPropertyDescriptor(window.parent.HTMLTextAreaElement.prototype, 'value').set;
+        nativeInputSetter.call(ta, newVal);
+        ta.selectionStart = s + before.length;
+        ta.selectionEnd   = s + before.length + selected.length;
+        ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+        ta.focus();
+    }}
+    window.applyFmt = applyFmt;
+    window.parent.document.addEventListener('keydown', function(ev) {{
+        if (!ev.ctrlKey && !ev.metaKey) return;
+        var ta = ev.target;
+        if (!ta || ta.tagName.toLowerCase() !== 'textarea') return;
+        if (!ta.placeholder || !ta.placeholder.startsWith(PLACEHOLDER_HINT)) return;
+        var k = ev.key.toLowerCase();
+        if (k === 'b') {{ ev.preventDefault(); applyFmt('**','**'); }}
+        else if (k === 'i') {{ ev.preventDefault(); applyFmt('*','*'); }}
+        else if (k === 'u') {{ ev.preventDefault(); applyFmt('<u>','</u>'); }}
+        else if (k === 'e') {{ ev.preventDefault(); applyFmt('<center>','</center>'); }}
+    }}, false);
+}})();
+</script>
+""", height=42, scrolling=False)
+
+            col_desc_input, col_desc_preview = st.columns([1, 1], gap="medium")
+            with col_desc_input:
+                p_description = st.text_area(
+                    "Nhập Markdown ở đây",
+                    value=problem.get("description", ""), height=180, key=f"oe_p_desc_{pkey}",
+                    label_visibility="collapsed",
+                    placeholder="VD:\n**Yêu cầu:** Viết chương trình...\n*Dữ liệu vào:* Nhập N từ bàn phím\n*Kết quả ra:* In YES hoặc NO",
+                )
+            with col_desc_preview:
+                with st.container(border=True, height=183):
+                    if p_description.strip():
+                        # unsafe_allow_html=True để render <u>, <center> từ toolbar
+                        st.markdown(p_description.replace("\r\n", "\n").replace("\n", "  \n"), unsafe_allow_html=True)
+                    else:
+                        st.caption("_Xem trước hiển thị ở đây..._")
+
             p_max_score = pc2.number_input(
                 "Điểm tối đa", min_value=0.0, value=float(problem.get("max_score", 10)), key=f"oe_p_maxscore_{pkey}",
             )
@@ -341,7 +424,7 @@ def page_create_exam(teacher_id: int):
                                     else:
                                         generated.append({
                                             "id": None, "input": inp, "expected_output": out,
-                                            "is_sample": False, "timeout": 5, "note": f"case {idx}",
+                                            "is_sample": True, "timeout": 5, "note": f"case {idx}",
                                         })
                                 if not has_error:
                                     problem["test_cases"] = generated
@@ -385,7 +468,7 @@ def page_create_exam(teacher_id: int):
                                         generated.append({
                                             "id": None, "input": "", "expected_output": stdout_val,
                                             "call_args": call_args, "call_kwargs": {}, "expected_return": ret_val,
-                                            "is_sample": False, "timeout": 5, "note": f"case {idx}",
+                                            "is_sample": True, "timeout": 5, "note": f"case {idx}",
                                         })
                                 if not has_error and generated:
                                     problem["test_cases"] = generated
@@ -483,11 +566,48 @@ def page_create_exam(teacher_id: int):
                 "final_score_policy": st.session_state.get(f"{mkey}_policy", "best"),
             }
             new_exam_id = service.save_exam(teacher_id, class_id, exam_meta, problems_draft, exam_id)
+
+            # ── Tự động đồng bộ mỗi câu sang Quản lý khung mẫu (templates_store) ──
+            # Câu nào có tên → tạo / cập nhật 1 khung mẫu tương ứng để dùng ở trang
+            # Chấm 1 đề / Chấm cả kỳ thi mà không cần tạo thủ công lại.
+            synced = []
+            for p in problems_draft:
+                pname = (p.get("title") or "").strip()
+                if not pname:
+                    continue
+                # Chuyển test_cases về định dạng tương thích với templates_store
+                tcs = []
+                for tc in p.get("test_cases", []):
+                    tcs.append({
+                        "input": tc.get("input") or "",
+                        "expected_output": tc.get("expected_output") or "",
+                        "call_args": tc.get("call_args"),
+                        "call_kwargs": tc.get("call_kwargs"),
+                        "expected_return": tc.get("expected_return"),
+                        "timeout": float(tc.get("timeout") or 5),
+                        "note": tc.get("note") or "",
+                    })
+                template_data = {
+                    "name": pname,
+                    "description": p.get("description") or "",
+                    "function_name": p.get("function_name") or None,
+                    "structural_rules": {
+                        "required_constructs": p.get("required_constructs") or [],
+                        "forbidden_constructs": p.get("forbidden_constructs") or [],
+                        "forbidden_imports": p.get("forbidden_imports") or [],
+                        "forbidden_calls": p.get("forbidden_calls") or [],
+                    },
+                    "test_cases": tcs,
+                }
+                _save_template_to_store(pname, template_data, teacher_id)
+                synced.append(pname)
+
             st.session_state.pop(state_key, None)
             # Dọn luôn các khoá widget của khối cấu hình: nếu vừa tạo bài MỚI, namespace
             # "..._new" còn sót giá trị cũ sẽ tự điền vào lần tạo bài mới kế tiếp.
             for k in [k for k in st.session_state if k.startswith(f"{mkey}_")]:
                 st.session_state.pop(k, None)
             st.session_state["oe_pending_exam_choice"] = new_exam_id
-            st.session_state["_oe_saved_msg"] = "Đã lưu bài kiểm tra (chưa công bố cho học sinh)."
+            sync_msg = f" · Đã đồng bộ sang Khung mẫu: {', '.join(synced)}." if synced else ""
+            st.session_state["_oe_saved_msg"] = f"Đã lưu bài kiểm tra (chưa công bố cho học sinh).{sync_msg}"
             st.rerun()

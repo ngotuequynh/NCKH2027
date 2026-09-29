@@ -6,9 +6,10 @@ from google.genai import types
 
 _CACHED_WORKING_MODEL = None
 
-def ask_ai_tutor(problem: dict, student_code: str, chat_history: list, user_message: str, trial_result: dict | None = None) -> str:
+def ask_ai_tutor(problem: dict, student_code: str, chat_history: list, user_message: str, trial_result: dict | None = None, sample_tcs: list | None = None) -> str:
     """Gọi Google Gemini API (bản mới nhất google-genai) để gợi ý học sinh.
-    Đã bổ sung đọc kết quả/lỗi chạy thử gần nhất (trial_result) để gia sư AI biết chính xác lỗi sai."""
+    Đã bổ sung đọc kết quả/lỗi chạy thử gần nhất (trial_result) để gia sư AI biết chính xác lỗi sai.
+    Đã bổ sung sample_tcs để AI biết trước test case mẫu của bài ngay cả khi chưa chạy thử."""
     global _CACHED_WORKING_MODEL
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -20,6 +21,22 @@ def ask_ai_tutor(problem: dict, student_code: str, chat_history: list, user_mess
         return "Lỗi hệ thống: Chưa cấu hình GEMINI_API_KEY trong file .env hoặc st.secrets."
 
     client = genai.Client(api_key=api_key)
+
+    # Tóm tắt test case mẫu (luôn có, ngay cả trước khi chạy thử)
+    sample_tcs_info = ""
+    if sample_tcs:
+        sample_tcs_info = "\n[TEST CASE MẪU CỦA BÀI]\n"
+        for i, tc in enumerate(sample_tcs, start=1):
+            import json as _json
+            input_str = tc.get("input") or (
+                _json.dumps(tc.get("call_args"), ensure_ascii=False)
+                if tc.get("call_args") is not None else ""
+            )
+            expected_str = tc.get("expected_output") or (
+                _json.dumps(tc.get("expected_return"), ensure_ascii=False)
+                if tc.get("expected_return") is not None else ""
+            )
+            sample_tcs_info += f"  Test {i}: Input={repr(input_str)} | Expected={repr(expected_str)}\n"
 
     trial_info = ""
     if trial_result:
@@ -41,13 +58,18 @@ Code hiện tại của học sinh:
 ```python
 {student_code}
 ```
-{trial_info}
-Nhiệm vụ của bạn:
-1. Giải đáp câu hỏi của học sinh về đoạn code trên và dựa vào [KẾT QUẢ CHẠY THỬ GẦN NHẤT] ở trên (nếu có) để chỉ ra nguyên nhân bài chưa đạt hoặc bị lỗi.
-2. Hướng dẫn học sinh tự tìm ra lỗi sai hoặc hướng giải.
-3. TUYỆT ĐỐI KHÔNG viết sẵn code giải hoàn chỉnh hoặc đưa ra đáp án trực tiếp. 
-4. Chỉ đưa ra gợi ý ngắn gọn, giải thích khái niệm, hoặc cung cấp đoạn mã giả (pseudo-code) cực kỳ ngắn gọn nếu thật sự cần thiết.
-5. Luôn giữ thái độ động viên, tích cực. Xưng hô là "AI" hoặc "Thầy/Cô" và gọi học sinh là "bạn" hoặc "em".
+{sample_tcs_info}{trial_info}
+
+HƯỚNG DẪN TRẢ LỜI (bắt buộc tuân thủ):
+1. Mỗi câu trả lời PHẢI HOÀN CHỈNH, không bao giờ bỏ lửng hoặc cắt ngang giữa chừng.
+2. Trả lời ngắn gọn, tập trung vào đúng 1 vấn đề học sinh hỏi. Tối đa 5-8 câu mỗi lần.
+3. Nếu cần giải thích nhiều bước, hãy chia nhỏ từng phần, hỏi học sinh xem hiểu chưa trước khi tiếp.
+4. TUYỆT ĐỐI KHÔNG viết code giải hoàn chỉnh hoặc đưa ra đáp án trực tiếp.
+5. Dùng pseudo-code ngắn (2-3 dòng) chỉ khi thật sự cần thiết.
+6. Xưng hô là "Thầy/Cô" và gọi học sinh là "em".
+7. Luôn giữ thái độ động viên, tích cực.
+8. Nếu có [TEST CASE MẪU], hãy dùng để giải thích input/output kỳ vọng khi cần.
+9. Nếu có [KẾT QUẢ CHẠY THỬ], hãy dùng đó để chỉ ra nguyên nhân cụ thể tại sao bài chưa đạt.
 """
 
     contents = []
@@ -84,13 +106,18 @@ Nhiệm vụ của bạn:
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
-                        temperature=0.5,
-                        max_output_tokens=500,
+                        temperature=0.4,
+                        max_output_tokens=1500,   # tăng từ 500 → 1500 để tránh cắt ngang
                     ),
                 )
                 # Lưu lại model thành công để lần sau ưu tiên dùng trước
                 _CACHED_WORKING_MODEL = model_name
-                return response.text
+                text = response.text or ""
+                # Bỏ dấu ** thừa ở cuối (thường do Markdown bị cắt ngang)
+                text = text.rstrip()
+                if text.endswith("**") and text.count("**") % 2 == 1:
+                    text = text[:-2].rstrip()
+                return text
             except Exception as e:
                 err_str = str(e)
                 # Nếu gặp lỗi 503 (quá tải tạm thời), thử lại sau 0.3s trước khi chuyển model
