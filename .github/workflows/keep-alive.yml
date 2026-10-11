@@ -1,0 +1,47 @@
+# Giữ app Streamlit Community Cloud không ngủ và project Supabase free tier không bị pause.
+# Cần 2 secret trong GitHub repo (Settings → Secrets and variables → Actions):
+#   APP_URL       vd https://ten-app.streamlit.app
+#   DATABASE_URL  giống hệt [database].url trong .streamlit/secrets.toml
+name: Keep alive
+
+on:
+  schedule:
+    # Giờ UTC; Việt Nam = UTC+7 → chạy lúc 06:00, 14:00, 22:00.
+    # Streamlit cho app ngủ sau khoảng 12 giờ không có người dùng nên cần chạy dày hơn 1 lần/ngày.
+    - cron: "0 7,15,23 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "psycopg[binary]"
+      - run: python scripts/keep_alive_db.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  wake-streamlit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install playwright==1.47.0
+          python -m playwright install --with-deps chromium
+      - run: python scripts/keep_alive_app.py
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keep-alive-screenshot
+          path: keep_alive_failed.png
+          if-no-files-found: ignore
