@@ -767,7 +767,9 @@ with st.sidebar:
                 </div>
             ''', unsafe_allow_html=True)
         else:
-            st.page_link(page, label=label, icon=f":material/{icon_name}:")
+            token = st.session_state.get("_session_token")
+            qp = {"session": token} if token else None
+            st.page_link(page, label=label, icon=f":material/{icon_name}:", query_params=qp)
     
     st.divider()
     if st.button("Đăng xuất", icon=":material/logout:", key="logout_btn", use_container_width=True):
