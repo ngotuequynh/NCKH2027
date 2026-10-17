@@ -43,6 +43,9 @@ def try_restore_session():
         if teacher_id:
             st.session_state["teacher_id"] = teacher_id
             st.session_state["_session_token"] = token
+            if st.query_params.get("session") != token:
+                st.query_params["session"] = token
+                st.rerun()
 
     # GHIM TOKEN VÀO URL: Khi chuyển trang, Streamlit sẽ xoá query_params. 
     # Đoạn này đảm bảo URL luôn có ?session=... ở mọi trang để F5 không bao giờ chết.
@@ -92,7 +95,15 @@ def render_login_page():
                         st.session_state["teacher_id"] = teacher_id
                         if remember:
                             token = auth.create_remember_token(teacher_id)
-                            _cookie_controller().set(COOKIE_NAME, token)
+                            from datetime import datetime, timedelta, timezone
+                            expires_dt = datetime.now(timezone.utc) + timedelta(days=auth.SESSION_DAYS)
+                            _cookie_controller().set(
+                                COOKIE_NAME,
+                                token,
+                                max_age=auth.SESSION_DAYS * 86400,
+                                expires=expires_dt,
+                                same_site="lax",
+                            )
                             # Lưu vào URL để bypass lỗi iframe chặn cookie trên Streamlit Cloud
                             st.query_params["session"] = token
                             st.session_state["_session_token"] = token
