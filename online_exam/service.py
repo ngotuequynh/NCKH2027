@@ -563,7 +563,9 @@ def create_student(teacher_id: int, class_id: int, full_name: str, custom_userna
             
         student = Student(
             class_id=class_id, username=username,
-            password_hash=auth.hash_password(raw_password), full_name=full_name.strip(),
+            password_hash=auth.hash_password(raw_password),
+            password_plain=raw_password,
+            full_name=full_name.strip(),
         )
         session.add(student)
         session.commit()
@@ -628,6 +630,7 @@ def reset_student_password(student_id: int, teacher_id: int) -> str:
         if student is None:
             raise ValueError("Không tìm thấy học sinh hoặc không có quyền.")
         student.password_hash = auth.hash_password(raw_password)
+        student.password_plain = raw_password
         session.commit()
     _clear_read_caches()
     return raw_password
@@ -1173,7 +1176,9 @@ def bulk_create_students(teacher_id: int, class_id: int, students_data: list[dic
                 
             student = Student(
                 class_id=class_id, username=username,
-                password_hash=data["password_hash"], full_name=data["full_name"].strip(),
+                password_hash=data["password_hash"],
+                password_plain=data["raw_password"],
+                full_name=data["full_name"].strip(),
             )
             session.add(student)
             results.append({"student": student, "raw_password": data["raw_password"]})

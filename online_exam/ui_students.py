@@ -77,6 +77,7 @@ def _render_bulk_import(class_id: int, teacher_id: int):
                     
                     students_to_create = []
                     valid_rows_idx = []
+                    rows_out = []
                     for idx, row in df_in.iterrows():
                         ho = str(row[ho_col]).strip()
                         ten = str(row[ten_col]).strip()
@@ -209,8 +210,9 @@ def _render_student_list_fragment(class_id: int, teacher_id: int):
 
     for s in filtered_students:
         with st.container(border=True):
-            col_info, col_reset, col_delete = st.columns([3, 1, 1])
-            col_info.markdown(f":material/person: **{s.full_name}** — Tài khoản: `{s.username}`")
+            col_info, col_reset, col_delete = st.columns([3.2, 0.9, 0.9])
+            pw_val = f"`{s.password_plain}`" if getattr(s, "password_plain", None) else "*(chưa lưu — bấm Reset)*"
+            col_info.markdown(f":material/person: **{s.full_name}** — Tài khoản: `{s.username}` — Mật khẩu: {pw_val}")
             if col_reset.button("Reset mật khẩu", icon=":material/key:", key=f"reset_pw_{s.id}", use_container_width=True):
                 new_password = service.reset_student_password(s.id, teacher_id)
                 st.session_state[f"_reset_pw_shown_{s.id}"] = new_password

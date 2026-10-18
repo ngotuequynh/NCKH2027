@@ -33,6 +33,18 @@ def get_engine():
         engine_kwargs.update(pool_size=10, max_overflow=20, pool_recycle=300)
     engine = create_engine(db_url, **engine_kwargs)
     Base.metadata.create_all(engine)
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            if is_sqlite:
+                try:
+                    conn.execute(text("ALTER TABLE students ADD COLUMN password_plain VARCHAR(255);"))
+                except Exception:
+                    pass
+            else:
+                conn.execute(text("ALTER TABLE students ADD COLUMN IF NOT EXISTS password_plain VARCHAR(255);"))
+    except Exception:
+        pass
     return engine
 
 
