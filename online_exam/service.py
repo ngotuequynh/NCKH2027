@@ -380,6 +380,7 @@ def load_exam_full(exam_id: int, teacher_id: int) -> dict | None:
             "duration_minutes": exam.duration_minutes,
             "access_code": exam.access_code,
             "final_score_policy": exam.final_score_policy,
+            "allow_ai_assistant": exam.allow_ai_assistant,
             "is_published": exam.is_published,
             "is_archived": exam.is_archived,
             "force_unlocked": exam.force_unlocked,

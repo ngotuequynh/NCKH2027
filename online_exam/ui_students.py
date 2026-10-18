@@ -182,10 +182,11 @@ def _render_student_list_fragment(class_id: int, teacher_id: int):
         return
 
     st.divider()
-    search_term = st.text_input(
-        "Tìm kiếm học sinh (tự động lọc theo tên hoặc tài khoản)",
+    st.text_input(
+        "Tìm kiếm học sinh (lọc tức thì theo tên hoặc tài khoản)",
         icon=":material/search:",
         key=f"search_student_{class_id}",
+        placeholder="Gõ tên hoặc tài khoản để lọc ngay...",
     )
     
     import unicodedata
@@ -195,21 +196,24 @@ def _render_student_list_fragment(class_id: int, teacher_id: int):
         nfkd = unicodedata.normalize('NFKD', text)
         no_accent = "".join([c for c in nfkd if not unicodedata.combining(c)]).lower()
         return no_accent.replace("đ", "d")
-        
-    search_norm = _normalize_search(search_term)
 
-    filtered_students = []
+    st.markdown(
+        f'<div id="student-count-{class_id}" style="color:var(--text-color, #4b5563);font-size:0.875rem;margin-bottom:8px;">'
+        f'Danh sách học sinh ({len(students)}/{len(students)})'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div id="no-student-{class_id}" style="display:none;padding:12px;background:#f3f4f6;border-radius:8px;color:#374151;margin-bottom:12px;">'
+        f'ℹ️ Không tìm thấy học sinh nào khớp với từ khoá tìm kiếm.'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
     for s in students:
-        if search_norm:
-            name_norm = _normalize_search(s.full_name)
-            if search_norm not in name_norm and search_norm not in s.username.lower():
-                continue
-        filtered_students.append(s)
-
-    st.caption(f"Danh sách học sinh ({len(filtered_students)}/{len(students)})")
-
-    for s in filtered_students:
+        kw = f"{_normalize_search(s.full_name)} {s.username.lower()} {s.full_name.lower()}"
         with st.container(border=True):
+            st.markdown(f'<div class="student-card-marker-{class_id}" data-kw="{kw}" style="display:none;"></div>', unsafe_allow_html=True)
             col_info, col_reset, col_delete = st.columns([3.2, 0.9, 0.9])
             pw_val = f"`{s.password_plain}`" if getattr(s, "password_plain", None) else "*(chưa lưu — bấm Reset)*"
             col_info.markdown(f":material/person: **{s.full_name}** — Tài khoản: `{s.username}` — Mật khẩu: {pw_val}")
@@ -227,5 +231,84 @@ def _render_student_list_fragment(class_id: int, teacher_id: int):
                     icon=":material/key:",
                 )
 
-    if not filtered_students and search_term:
-        st.info("Không tìm thấy học sinh nào khớp với từ khoá tìm kiếm.", icon=":material/search:")
+    import streamlit.components.v1 as components
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const doc = window.parent.document;
+            function normalizeStr(str) {{
+                if (!str) return '';
+                return str.normalize("NFD")
+                          .replace(/[\\u0300-\\u036f]/g, "")
+                          .replace(/đ/g, "d")
+                          .replace(/Đ/g, "d")
+                          .toLowerCase()
+                          .trim();
+            }}
+
+            function filterStudents() {{
+                const inputWrap = doc.querySelector('.st-key-search_student_{class_id}');
+                if (!inputWrap) return;
+                const input = inputWrap.querySelector('input');
+                const query = input ? normalizeStr(input.value) : '';
+
+                const markers = doc.querySelectorAll('.student-card-marker-{class_id}');
+                let visibleCount = 0;
+                markers.forEach(m => {{
+                    let card = m.closest('[data-testid="stVerticalBlockBorderWrapper"]');
+                    if (!card) {{
+                        let cur = m;
+                        while (cur && cur.parentElement && cur.parentElement.getAttribute('data-testid') !== 'stVerticalBlock') {{
+                            cur = cur.parentElement;
+                        }}
+                        card = cur;
+                    }}
+                    const kw = m.getAttribute('data-kw') || '';
+                    if (!query || kw.includes(query)) {{
+                        if (card) card.style.display = '';
+                        visibleCount++;
+                    }} else {{
+                        if (card) card.style.display = 'none';
+                    }}
+                }});
+
+                const countEl = doc.getElementById('student-count-{class_id}');
+                if (countEl) {{
+                    countEl.innerText = `Danh sách học sinh (${{visibleCount}}/${{markers.length}})`;
+                }}
+
+                const noResEl = doc.getElementById('no-student-{class_id}');
+                if (noResEl) {{
+                    noResEl.style.display = (visibleCount === 0 && query) ? 'block' : 'none';
+                }}
+            }}
+
+            function initSearch() {{
+                const inputWrap = doc.querySelector('.st-key-search_student_{class_id}');
+                if (!inputWrap) {{
+                    setTimeout(initSearch, 80);
+                    return;
+                }}
+                const input = inputWrap.querySelector('input');
+                if (!input) {{
+                    setTimeout(initSearch, 80);
+                    return;
+                }}
+
+                if (!input.dataset.instantSearchBound) {{
+                    input.dataset.instantSearchBound = "true";
+                    input.addEventListener('input', filterStudents);
+                }}
+                filterStudents();
+            }}
+
+            initSearch();
+            setTimeout(filterStudents, 100);
+            setTimeout(filterStudents, 300);
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )

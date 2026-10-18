@@ -30,22 +30,6 @@ def _inject_tab_hack():
             }
         });
 
-        // Tự động kích hoạt lọc danh sách ngay khi gõ vào ô tìm kiếm (không cần bấm Enter/click ra ngoài)
-        let _liveSearchTimer = null;
-        doc.addEventListener('input', function(e) {
-            const input = e.target;
-            if (input && input.tagName.toLowerCase() === 'input') {
-                const container = input.closest('div[data-testid="stTextInput"]');
-                if (container) {
-                    clearTimeout(_liveSearchTimer);
-                    _liveSearchTimer = setTimeout(function() {
-                        input.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-                        }));
-                    }, 250);
-                }
-            }
-        }, { passive: true });
 
         // ── Formatting toolbar support ──
         (function() {

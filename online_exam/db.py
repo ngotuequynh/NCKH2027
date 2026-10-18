@@ -41,8 +41,13 @@ def get_engine():
                     conn.execute(text("ALTER TABLE students ADD COLUMN password_plain VARCHAR(255);"))
                 except Exception:
                     pass
+                try:
+                    conn.execute(text("ALTER TABLE exams ADD COLUMN allow_ai_assistant BOOLEAN DEFAULT 0;"))
+                except Exception:
+                    pass
             else:
                 conn.execute(text("ALTER TABLE students ADD COLUMN IF NOT EXISTS password_plain VARCHAR(255);"))
+                conn.execute(text("ALTER TABLE exams ADD COLUMN IF NOT EXISTS allow_ai_assistant BOOLEAN DEFAULT FALSE;"))
     except Exception:
         pass
     return engine
